@@ -27,6 +27,7 @@
     bypassHash: false,
     fieldEdit: null,
     dialogScope: null,
+    diffVersion: null,
     loggedIn: false,
     busy: false,
     lastActivity: Date.now(),
@@ -801,6 +802,19 @@
     "</div>";
   }
 
+  function handleHistoryClick(event) {
+    const button = event.target.closest("[data-action]");
+    if (!button) return;
+    const version = Number(button.dataset.version);
+    if (button.dataset.action === "view-version") {
+      openHistoryPreview(version);
+      return;
+    }
+    if (button.dataset.action === "restore-version") {
+      restoreVersion(version);
+    }
+  }
+
   async function loadHistory() {
     if (state.route.mode !== "service") return;
     try {
@@ -886,8 +900,11 @@
           (key ? "正常" : "缺少凭证") + "</span></span>" +
           '<span class="cell-actions">' +
             (key
-              ? '<button class="btn btn-ghost btn-sm" type="button" data-action="key-download">下载私钥</button>' +
-                '<button class="btn btn-ghost btn-sm" type="button" data-action="key-regenerate">重新生成</button>' +
+              ? '<button class="btn btn-ghost btn-sm" type="button" data-action="key-view">查看私钥</button>' +
+                '<button class="btn btn-ghost btn-sm" type="button" data-action="key-download">下载私钥</button>' +
+                '<button class="btn btn-ghost btn-sm" type="button" data-action="key-token">换令牌</button>' +
+                '<button class="btn btn-ghost btn-sm" type="button" data-action="key-pair">换密钥对</button>' +
+                '<button class="btn btn-ghost btn-sm" type="button" data-action="key-regenerate">全部重生成</button>' +
                 '<button class="icon-btn danger-text" type="button" data-action="key-delete" aria-label="删除 ' + esc(service.name) + ' 的凭证" title="删除凭证"><svg class="icon sm"><use href="#i-trash"/></svg></button>'
               : '<button class="btn btn-secondary btn-sm" type="button" data-action="key-generate">生成凭证</button>') +
           "</span>" +
@@ -1619,16 +1636,11 @@
       default: defaultValue === null ? undefined : defaultValue
     };
     const previous = state.fieldEdit.mode === "edit" ? state.editor.schema[state.fieldEdit.index] : null;
-    if (previous && isSensitive(previous) && state.editor.baselineSecrets.has(previous.path)) {
-      if (previous.path !== path) {
-        error.textContent = "已设置的敏感字段不能修改路径，请先清除密钥。";
-        form.elements.path.focus();
-        return;
-      }
-      if (!isSensitive(next)) {
-        error.textContent = "已设置的敏感字段不能直接改为非敏感类型，请先清除密钥。";
-        return;
-      }
+    if (previous && isSensitive(previous) && isSensitive(next) &&
+      state.editor.baselineSecrets.has(previous.path) && previous.path !== path) {
+      error.textContent = "已设置的敏感字段不能修改路径，请先清除密钥或转换为普通字段。";
+      form.elements.path.focus();
+      return;
     }
     if (!previous) {
       state.editor.schema.push(next);
@@ -1665,7 +1677,9 @@
       } else if (isSensitive(previous) && !isSensitive(next)) {
         state.editor.secretMode.delete(path);
         state.editor.secretInput.delete(path);
-        state.editor.values[path] = state.editor.values[path] ?? "";
+        state.editor.baselineSecrets.delete(path);
+        state.editor.values[path] = "";
+        state.editor.savedValues[path] = "";
       }
       state.editor.schema[state.fieldEdit.index] = next;
     }
@@ -1820,20 +1834,138 @@
     });
   }
 
-  async function restoreVersion(version) {
-    if (!state.editor) return;
-    askConfirm({
-      title: "恢复为草稿",
-      text: "将历史版本 v" + version + " 恢复为当前草稿。发布版本不会改变，确认后仍需发布才会生效。",
-      confirmLabel: "恢复为草稿",
-      danger: false,
-      onConfirm: async () => {
-        await api(draftUrl(state.route, "/history/" + enc(version) + "/restore"), { method: "POST" });
-        await reloadEditor();
-        await loadHistory();
-        toast("已恢复为草稿 v" + version);
+  function diffText(value) {
+    const text = value === undefined || value === null ? "" : String(value);
+    return text.length > 120 ? text.slice(0, 120) + "…" : text;
+  }
+
+  function buildVersionDiff(item, editor) {
+    const historySchema = Array.isArray(item.schema) ? item.schema : [];
+    const currentSchema = Array.isArray(editor.schema) ? editor.schema : [];
+    const historyValues = item.values || {};
+    const historyByPath = new Map(historySchema.map((field) => [field.path, field]));
+    const currentByPath = new Map(currentSchema.map((field) => [field.path, field]));
+    const result = { added: [], removed: [], changed: [] };
+
+    for (const field of historySchema) {
+      if (!currentByPath.has(field.path)) {
+        result.added.push({ path: field.path, label: field.label, type: field.type });
       }
-    });
+    }
+    for (const field of currentSchema) {
+      if (!historyByPath.has(field.path)) {
+        result.removed.push({ path: field.path, label: field.label, type: field.type });
+      }
+    }
+    for (const field of historySchema) {
+      const current = historyByPath.has(field.path) ? currentByPath.get(field.path) : null;
+      if (!current) continue;
+      const changes = [];
+      const attributes = [
+        ["label", "显示名称"], ["type", "类型"], ["description", "说明"],
+        ["required", "必填"], ["environment", "环境变量"], ["yaml", "YAML 路径"]
+      ];
+      for (const [key, label] of attributes) {
+        const before = current[key];
+        const after = field[key];
+        if (String(before ?? "") !== String(after ?? "")) {
+          changes.push({ label, before: diffText(before), after: diffText(after) });
+        }
+      }
+      const currentOptions = (current.options || []).join(", ");
+      const historyOptions = (field.options || []).join(", ");
+      if (currentOptions !== historyOptions) {
+        changes.push({ label: "可选项", before: diffText(currentOptions), after: diffText(historyOptions) });
+      }
+      if (isSensitive(field) || isSensitive(current)) {
+        const beforeSet = effectiveSecretSet(field.path);
+        const afterSet = getPath(historyValues, field.path) === KEEP_SECRET;
+        if (beforeSet !== afterSet) {
+          changes.push({
+            label: "敏感值",
+            before: beforeSet ? "已设置" : "未设置",
+            after: afterSet ? "已设置" : "未设置"
+          });
+        }
+      } else {
+        const before = String(editor.values[field.path] ?? "");
+        const after = displayValue(field, getPath(historyValues, field.path));
+        if (before !== after) {
+          changes.push({ label: "值", before: diffText(before), after: diffText(after) });
+        }
+      }
+      if (changes.length) {
+        result.changed.push({ path: field.path, label: field.label || field.path, changes });
+      }
+    }
+    return result;
+  }
+
+  function renderVersionDiff(diff, version) {
+    const total = diff.added.length + diff.removed.length + diff.changed.length;
+    if (!total) {
+      return '<p class="muted">历史版本 v' + esc(version) + " 与当前草稿一致，无差异。</p>";
+    }
+    const rows = [];
+    if (diff.added.length) {
+      rows.push('<h3>恢复后新增的字段</h3><ul class="diff-list">' +
+        diff.added.map((field) => '<li class="diff-item diff-add"><span class="chip chip-success">新增</span>' +
+          '<code class="mono">' + esc(field.path) + "</code>" +
+          (field.label && field.label !== field.path ? " " + esc(field.label) : "") +
+          ' <span class="muted">· ' + esc(field.type) + "</span></li>").join("") + "</ul>");
+    }
+    if (diff.removed.length) {
+      rows.push('<h3>恢复后移除的字段</h3><ul class="diff-list">' +
+        diff.removed.map((field) => '<li class="diff-item diff-remove"><span class="chip chip-warn">移除</span>' +
+          '<code class="mono">' + esc(field.path) + "</code>" +
+          (field.label && field.label !== field.path ? " " + esc(field.label) : "") +
+          ' <span class="muted">· ' + esc(field.type) + "</span></li>").join("") + "</ul>");
+    }
+    if (diff.changed.length) {
+      rows.push('<h3>字段变更（当前草稿 → 历史 v' + esc(version) + "）</h3>" +
+        diff.changed.map((field) => '<div class="diff-field"><code class="mono">' + esc(field.path) + "</code>" +
+          '<ul class="diff-list">' + field.changes.map((change) =>
+            '<li class="diff-item"><span class="diff-label">' + esc(change.label) + "</span>" +
+            '<span class="diff-before">' + esc(change.before || "（空）") + "</span>" +
+            '<span class="diff-arrow">→</span>' +
+            '<span class="diff-after">' + esc(change.after || "（空）") + "</span></li>").join("") +
+          "</ul></div>").join(""));
+    }
+    return rows.join("");
+  }
+
+  function restoreVersion(version) {
+    if (!state.editor) return;
+    const item = state.history.find((entry) => Number(entry.version) === Number(version));
+    if (!item) return;
+    const diff = buildVersionDiff(item, state.editor);
+    $("#version-diff-title").textContent = "恢复 v" + version + " 为草稿";
+    $("#version-diff-body").innerHTML =
+      '<div class="notice notice-warn"><svg class="icon"><use href="#i-warn" /></svg>' +
+      "<div>恢复只替换草稿，发布的 v" + esc(version) +
+      " 不会改变，仍需发布才会生效。当前未保存的修改会被覆盖。</div></div>" +
+      renderVersionDiff(diff, version);
+    state.diffVersion = Number(version);
+    openDialog("dlg-version-diff");
+  }
+
+  async function confirmVersionRestore() {
+    const version = state.diffVersion;
+    if (!version || !state.editor) return;
+    const button = $("#confirm-version-restore");
+    button.disabled = true;
+    closeDialog(dialogById("dlg-version-diff"));
+    try {
+      await api(draftUrl(state.route, "/history/" + enc(version) + "/restore"), { method: "POST" });
+      await reloadEditor();
+      await loadHistory();
+      toast("已恢复为草稿 v" + version);
+    } catch (failure) {
+      if (failure.status !== 401) toastError(failure);
+    } finally {
+      button.disabled = false;
+      state.diffVersion = null;
+    }
   }
 
   function openImportDialog() {
@@ -1936,6 +2068,50 @@
       service: row.dataset.service || "",
       key: row.dataset.key || ""
     };
+  }
+
+  async function regenerateKeyToken(scope) {
+    askConfirm({
+      title: "重新生成访问令牌",
+      text: "只重新生成访问令牌，RSA 密钥对保持不变。旧令牌会立即失效，新令牌只显示一次。",
+      confirmLabel: "换令牌",
+      danger: true,
+      onConfirm: async () => {
+        const payload = await api("/api/v1/admin/projects/" + enc(scope.project) + "/environments/" +
+          enc(scope.environment) + "/services/" + enc(scope.service) + "/key/token/regenerate", { method: "POST" });
+        await loadKeys();
+        renderKeys();
+        showToken(payload.token);
+        toast("访问令牌已重新生成");
+      }
+    });
+  }
+
+  async function regenerateKeyPair(scope) {
+    askConfirm({
+      title: "重新生成 RSA 密钥对",
+      text: "只重新生成 RSA 密钥对，访问令牌保持不变。已签发的信封将无法用旧私钥解开，请同步更新客户端私钥。",
+      confirmLabel: "换密钥对",
+      danger: true,
+      onConfirm: async () => {
+        await api("/api/v1/admin/projects/" + enc(scope.project) + "/environments/" +
+          enc(scope.environment) + "/services/" + enc(scope.service) + "/key/pair/regenerate", { method: "POST" });
+        await loadKeys();
+        renderKeys();
+        toast("RSA 密钥对已重新生成");
+      }
+    });
+  }
+
+  async function viewKey(id, serviceName) {
+    try {
+      const payload = await api("/api/v1/admin/keys/" + enc(id) + "/private-key/view", { cache: "no-store" });
+      $("#private-key-content").textContent = payload.privateKey || "";
+      $("#private-key-title").textContent = "查看私钥" + (serviceName ? " · " + serviceName : "");
+      openDialog("dlg-private-key");
+    } catch (failure) {
+      if (failure.status !== 401) toastError(failure);
+    }
   }
 
   async function regenerateKey(scope) {
@@ -2144,6 +2320,8 @@
     $("#msb-publish").addEventListener("click", beginPublish);
     $("#confirm-publish").addEventListener("click", confirmPublish);
     $("#add-field").addEventListener("click", () => openFieldDialog("add"));
+    $("#history-panel").addEventListener("click", handleHistoryClick);
+    $("#confirm-version-restore").addEventListener("click", confirmVersionRestore);
     $("#field-groups").addEventListener("click", handleFieldClick);
     $("#field-groups").addEventListener("input", handleFieldInput);
     $("#field-groups").addEventListener("change", handleFieldInput);
@@ -2306,6 +2484,9 @@
         if (event.target === dialog) closeDialog(dialog);
       });
     });
+    $("#dlg-private-key").addEventListener("close", () => {
+      $("#private-key-content").textContent = "";
+    });
   }
 
   function closeMenu() {
@@ -2403,7 +2584,10 @@
     if (!row) return;
     const scope = rowScope(row);
     const action = button.dataset.action;
+    if (action === "key-view") viewKey(scope.key, scope.service);
     if (action === "key-download") downloadKey(scope.key, scope.service);
+    if (action === "key-token") regenerateKeyToken(scope);
+    if (action === "key-pair") regenerateKeyPair(scope);
     if (action === "key-regenerate") regenerateKey(scope);
     if (action === "key-delete") deleteKey(scope);
     if (action === "key-generate") createMissingKey(scope);

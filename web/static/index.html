@@ -488,6 +488,25 @@
     </div>
   </dialog>
 
+  <dialog class="dialog wide" id="dlg-private-key">
+    <div class="dialog-inner">
+      <div class="dialog-head">
+        <h2 id="private-key-title">查看私钥</h2>
+        <button class="icon-btn" type="button" data-close-dialog aria-label="关闭"><svg class="icon">
+            <use href="#i-close" />
+          </svg></button>
+      </div>
+      <div class="dialog-body">
+        <div class="notice notice-warn"><svg class="icon"><use href="#i-warn" /></svg>
+          <div>私钥仅用于对应服务解密配置。查看会写入审计日志，请勿截图或提交到版本库。</div></div>
+        <pre class="preview" id="private-key-content"></pre>
+      </div>
+      <div class="dialog-foot">
+        <button class="btn btn-secondary" type="button" data-close-dialog>关闭</button>
+      </div>
+    </div>
+  </dialog>
+
   <dialog class="dialog" id="dlg-confirm">
     <div class="dialog-inner">
       <div class="dialog-head">
@@ -503,6 +522,24 @@
       <div class="dialog-foot">
         <button class="btn btn-secondary" type="button" data-close-dialog>取消</button>
         <button class="btn btn-primary" id="confirm-ok" type="button">确认</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog class="dialog wide" id="dlg-version-diff">
+    <div class="dialog-inner">
+      <div class="dialog-head">
+        <h2 id="version-diff-title">恢复为草稿</h2>
+        <button class="icon-btn" type="button" data-close-dialog aria-label="关闭"><svg class="icon">
+            <use href="#i-close" />
+          </svg></button>
+      </div>
+      <div class="dialog-body">
+        <div id="version-diff-body"></div>
+      </div>
+      <div class="dialog-foot">
+        <button class="btn btn-secondary" type="button" data-close-dialog>取消</button>
+        <button class="btn btn-primary" id="confirm-version-restore" type="button">确认恢复</button>
       </div>
     </div>
   </dialog>

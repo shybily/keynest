@@ -152,11 +152,16 @@ func NewWithOptions(repository *store.Store, adminPassword, authSecret string, l
 	admin.Post("/projects/{project}/environments/{environment}/services", s.createService)
 	admin.Delete("/projects/{project}/environments/{environment}/services/{service}", s.deleteService)
 	admin.Post("/projects/{project}/environments/{environment}/services/{service}/key/regenerate", s.regenerateServiceKey)
+	admin.Post("/projects/{project}/environments/{environment}/services/{service}/key/token/regenerate", s.regenerateServiceToken)
+	admin.Post("/projects/{project}/environments/{environment}/services/{service}/key/pair/regenerate", s.regenerateServiceKeyPair)
 	admin.Delete("/projects/{project}/environments/{environment}/services/{service}/key", s.deleteServiceKey)
 	admin.Delete("/configs/{project}/{environment}/{service}", s.deleteServiceConfig)
 	admin.Get("/keys", s.listKeys)
 	admin.Post("/keys", s.createKey)
+	admin.Post("/keys/{id}/token/regenerate", s.regenerateKeyToken)
+	admin.Post("/keys/{id}/pair/regenerate", s.regenerateKeyPair)
 	admin.Get("/keys/{id}/private-key", s.downloadPrivateKey)
+	admin.Get("/keys/{id}/private-key/view", s.viewPrivateKey)
 	admin.Delete("/keys/{id}", s.deleteKey)
 
 	app.Get("/api/v1/configs/{project}/{environment}/{service}", s.getPublished)
@@ -473,9 +478,15 @@ func (s *Server) saveDraft(ctx iris.Context) {
 		clear[path] = true
 	}
 	previousValues := map[string]any{}
+	previousSensitive := make(map[string]bool)
 	previousFound := false
 	if previous, _, _, err := s.store.GetDraft(address); err == nil {
 		previousValues = previous.Values
+		for _, field := range previous.Schema {
+			if isSensitiveField(field) {
+				previousSensitive[field.Path] = true
+			}
+		}
 		previousFound = true
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		writeError(ctx, iris.StatusInternalServerError, err.Error())
@@ -498,6 +509,19 @@ func (s *Server) saveDraft(ctx iris.Context) {
 			if text, ok := value.(string); ok && text == keepSecret {
 				writeError(ctx, iris.StatusBadRequest, "reserved secret placeholder submitted without preserveSecrets")
 				return
+			}
+		}
+	}
+	if previousFound {
+		for path := range previousSensitive {
+			if sensitive[path] {
+				continue
+			}
+			if value, ok := getValue(request.Values, path); ok {
+				if text, ok := value.(string); ok && text == keepSecret {
+					writeError(ctx, iris.StatusBadRequest, "secret placeholder submitted for a field converted to non-sensitive: "+path)
+					return
+				}
 			}
 		}
 	}
@@ -925,6 +949,48 @@ func (s *Server) regenerateServiceKey(ctx iris.Context) {
 	ctx.JSON(iris.Map{"key": key, "token": token})
 }
 
+func (s *Server) regenerateServiceToken(ctx iris.Context) {
+	project, environment, service := ctx.Params().Get("project"), ctx.Params().Get("environment"), ctx.Params().Get("service")
+	token, _, err := generateAccessToken()
+	if err != nil {
+		writeError(ctx, iris.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := s.store.ReplaceServiceKeyHash(project, environment, service, tokenDigest(token)); err != nil {
+		writeStoreError(ctx, err)
+		return
+	}
+	address := config.Address{Project: project, Environment: environment, Service: service}
+	if err := s.store.Audit("admin", "regenerate-token", address, ""); err != nil {
+		writeError(ctx, iris.StatusInternalServerError, err.Error())
+		return
+	}
+	s.logger.Info("service token regenerated", "event", "service_token_regenerated",
+		"project", project, "environment", environment, "service", service)
+	ctx.JSON(iris.Map{"token": token})
+}
+
+func (s *Server) regenerateServiceKeyPair(ctx iris.Context) {
+	project, environment, service := ctx.Params().Get("project"), ctx.Params().Get("environment"), ctx.Params().Get("service")
+	privatePEM, publicPEM, err := secure.GenerateKeyPair(3072)
+	if err != nil {
+		writeError(ctx, iris.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := s.store.ReplaceServiceKeyPair(project, environment, service, string(publicPEM), string(privatePEM)); err != nil {
+		writeStoreError(ctx, err)
+		return
+	}
+	address := config.Address{Project: project, Environment: environment, Service: service}
+	if err := s.store.Audit("admin", "regenerate-keypair", address, ""); err != nil {
+		writeError(ctx, iris.StatusInternalServerError, err.Error())
+		return
+	}
+	s.logger.Info("service key pair regenerated", "event", "service_keypair_regenerated",
+		"project", project, "environment", environment, "service", service)
+	ctx.JSON(iris.Map{"ok": true})
+}
+
 func (s *Server) deleteServiceKey(ctx iris.Context) {
 	project, environment, service := ctx.Params().Get("project"), ctx.Params().Get("environment"), ctx.Params().Get("service")
 	if err := s.store.DeleteServiceKey(project, environment, service); err != nil {
@@ -954,6 +1020,19 @@ func (s *Server) deleteServiceConfig(ctx iris.Context) {
 		"project", address.Project, "environment", address.Environment,
 		"service", address.Service)
 	ctx.StatusCode(iris.StatusNoContent)
+}
+
+func generateAccessToken() (string, string, error) {
+	random := make([]byte, 32)
+	if _, err := rand.Read(random); err != nil {
+		return "", "", err
+	}
+	return "cm_" + base64.RawURLEncoding.EncodeToString(random), fmt.Sprintf("%x", random[:8]), nil
+}
+
+func tokenDigest(token string) string {
+	digest := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(digest[:])
 }
 
 func (s *Server) generateServiceKey(project, environment, service string) (store.AccessKey, string, []byte, []byte, error) {
@@ -1031,6 +1110,60 @@ func (s *Server) createKey(ctx iris.Context) {
 		"project", key.Project, "environment", key.Environment, "service", key.Service, "key_id", key.ID)
 	ctx.StatusCode(iris.StatusCreated)
 	ctx.JSON(iris.Map{"key": key, "token": plain})
+}
+
+func (s *Server) regenerateKeyToken(ctx iris.Context) {
+	id := ctx.Params().Get("id")
+	token, _, err := generateAccessToken()
+	if err != nil {
+		writeError(ctx, iris.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := s.store.ReplaceKeyHash(id, tokenDigest(token)); err != nil {
+		writeStoreError(ctx, err)
+		return
+	}
+	if err := s.store.Audit("admin", "regenerate-token", config.Address{}, id); err != nil {
+		writeError(ctx, iris.StatusInternalServerError, err.Error())
+		return
+	}
+	s.logger.Info("access key token regenerated", "event", "key_token_regenerated", "key_id", id)
+	ctx.JSON(iris.Map{"token": token})
+}
+
+func (s *Server) regenerateKeyPair(ctx iris.Context) {
+	id := ctx.Params().Get("id")
+	privatePEM, publicPEM, err := secure.GenerateKeyPair(3072)
+	if err != nil {
+		writeError(ctx, iris.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := s.store.ReplaceKeyPair(id, string(publicPEM), string(privatePEM)); err != nil {
+		writeStoreError(ctx, err)
+		return
+	}
+	if err := s.store.Audit("admin", "regenerate-keypair", config.Address{}, id); err != nil {
+		writeError(ctx, iris.StatusInternalServerError, err.Error())
+		return
+	}
+	s.logger.Info("access key pair regenerated", "event", "key_keypair_regenerated", "key_id", id)
+	ctx.JSON(iris.Map{"ok": true})
+}
+
+func (s *Server) viewPrivateKey(ctx iris.Context) {
+	id := ctx.Params().Get("id")
+	privateKey, err := s.store.PrivateKey(id)
+	if err != nil {
+		writeStoreError(ctx, err)
+		return
+	}
+	if err := s.store.Audit("admin", "view-private-key", config.Address{}, id); err != nil {
+		writeError(ctx, iris.StatusInternalServerError, err.Error())
+		return
+	}
+	s.logger.Info("private key viewed", "event", "private_key_viewed", "key_id", id)
+	ctx.Header("Cache-Control", "no-store")
+	ctx.JSON(iris.Map{"privateKey": privateKey})
 }
 
 func (s *Server) downloadPrivateKey(ctx iris.Context) {

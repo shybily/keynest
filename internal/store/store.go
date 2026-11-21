@@ -739,6 +739,77 @@ VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, key.ID, key.Name, key.Project, key.Enviro
 	return err
 }
 
+func (s *Store) ReplaceServiceKeyHash(project, environment, service, hash string) error {
+	result, err := s.db.Exec(`UPDATE access_keys SET key_hash=? WHERE project=? AND environment=? AND service=?`,
+		hash, project, environment, service)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Store) ReplaceServiceKeyPair(project, environment, service, publicKey, privateKey string) error {
+	privateCipher, err := s.encryptJSON(privateKey)
+	if err != nil {
+		return err
+	}
+	result, err := s.db.Exec(`UPDATE access_keys SET public_key=?, private_key_cipher=? WHERE project=? AND environment=? AND service=?`,
+		publicKey, privateCipher, project, environment, service)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Store) ReplaceKeyHash(id, hash string) error {
+	result, err := s.db.Exec(`UPDATE access_keys SET key_hash=? WHERE id=?`, hash, id)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Store) ReplaceKeyPair(id, publicKey, privateKey string) error {
+	privateCipher, err := s.encryptJSON(privateKey)
+	if err != nil {
+		return err
+	}
+	result, err := s.db.Exec(`UPDATE access_keys SET public_key=?, private_key_cipher=? WHERE id=?`,
+		publicKey, privateCipher, id)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 func (s *Store) PrivateKey(id string) (string, error) {
 	var encrypted []byte
 	if err := s.db.QueryRow(`SELECT private_key_cipher FROM access_keys WHERE id=?`, id).Scan(&encrypted); err != nil {

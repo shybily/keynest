@@ -18,8 +18,8 @@ func TestImportEnvironmentFile(t *testing.T) {
 	if len(draft.Schema) != 3 {
 		t.Fatalf("imported %d fields, want 3", len(draft.Schema))
 	}
-	if draft.Schema[1].Type != "secret" || !draft.Schema[1].Sensitive {
-		t.Fatalf("password field was not marked secret: %#v", draft.Schema[1])
+	if draft.Schema[1].Type != "string" || draft.Schema[1].Sensitive {
+		t.Fatalf("import must not auto-detect sensitive fields: %#v", draft.Schema[1])
 	}
 	if draft.Values["db_password"] != "a=b # c" || draft.Values["mode"] != "staging" {
 		t.Fatalf("unexpected imported values: %#v", draft.Values)
@@ -79,6 +79,32 @@ func TestImportYAMLAndJSONPreservesNestedStructures(t *testing.T) {
 				t.Fatalf("array value was not preserved: %#v", server["tags"])
 			}
 		})
+	}
+}
+
+func TestImportYAMLCommentsBecomeDescriptions(t *testing.T) {
+	content := "# database settings\n" +
+		"server:\n" +
+		"  # listening port\n" +
+		"  port: 8080 # inline description\n" +
+		"  enabled: true\n" +
+		"token: abc\n"
+	draft, err := Import("yaml", content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptions := make(map[string]string)
+	for _, field := range draft.Schema {
+		descriptions[field.Path] = field.Description
+	}
+	if descriptions["server.port"] != "inline description" {
+		t.Fatalf("inline comment was not imported: %q", descriptions["server.port"])
+	}
+	if descriptions["server.enabled"] != "" {
+		t.Fatalf("field without a comment got a description: %q", descriptions["server.enabled"])
+	}
+	if descriptions["token"] != "" {
+		t.Fatalf("document-level head comment was reused for a field: %q", descriptions["token"])
 	}
 }
 
