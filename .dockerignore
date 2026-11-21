@@ -1,0 +1,10 @@
+.git
+.idea
+.vscode
+bin
+data
+.env
+*.db
+*.log
+*.env
+*.pem
