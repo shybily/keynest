@@ -6,3 +6,6 @@
 *.env
 *.pem
 /docs
+.workbuddy
+.workbuddy-ai
+.qoder

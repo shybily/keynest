@@ -1,0 +1,16 @@
+services:
+  keynest:
+    image: hub.4q4ever.com/services/keynest:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      KEYNEST_ADDR: ":8080"
+      KEYNEST_DB: /var/lib/keynest/keynest.db
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - keynest-data:/var/lib/keynest
+
+volumes:
+  keynest-data:
