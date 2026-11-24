@@ -1,0 +1,107 @@
+openapi: 3.0.3
+info:
+  title: Keynest Mobile Read API
+  version: 0.3.2
+servers:
+  - url: https://config.example.internal
+paths:
+  /api/v1/configs/{project}/{environment}/{service}:
+    get:
+      summary: Fetch an encrypted published configuration
+      parameters:
+        - $ref: '#/components/parameters/Project'
+        - $ref: '#/components/parameters/Environment'
+        - $ref: '#/components/parameters/Service'
+        - $ref: '#/components/parameters/IfNoneMatch'
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Encrypted configuration envelope
+          headers:
+            ETag:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope'
+        '304':
+          description: Cached version is current
+        '401':
+          description: Bearer token is missing
+        '403':
+          description: Bearer token is outside the requested scope
+  /api/v1/configs/{project}/{environment}/{service}/render/{format}:
+    get:
+      parameters:
+        - $ref: '#/components/parameters/Project'
+        - $ref: '#/components/parameters/Environment'
+        - $ref: '#/components/parameters/Service'
+        - name: format
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [env, yaml]
+        - $ref: '#/components/parameters/IfNoneMatch'
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Encrypted rendered configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope'
+        '304':
+          description: Cached version is current
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    Project:
+      name: project
+      in: path
+      required: true
+      schema:
+        type: string
+    Environment:
+      name: environment
+      in: path
+      required: true
+      schema:
+        type: string
+    Service:
+      name: service
+      in: path
+      required: true
+      schema:
+        type: string
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      required: false
+      schema:
+        type: string
+        example: '"7"'
+  schemas:
+    Envelope:
+      type: object
+      required: [algorithm, keyId, version, encryptedKey, nonce, ciphertext]
+      properties:
+        algorithm:
+          type: string
+          enum: [RSA-OAEP-256+A256GCM]
+        keyId:
+          type: string
+        version:
+          type: integer
+        encryptedKey:
+          type: string
+        nonce:
+          type: string
+        ciphertext:
+          type: string
