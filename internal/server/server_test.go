@@ -115,6 +115,26 @@ func publicCall(t *testing.T, app *iris.Application, method, path, token string)
 	return response, payload
 }
 
+func publicCallWithHeaders(t *testing.T, app *iris.Application, method, path, token string, headers map[string]string) (*http.Response, []byte) {
+	t.Helper()
+	request := httptest.NewRequest(method, path, nil)
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	for name, value := range headers {
+		request.Header.Set(name, value)
+	}
+	recorder := httptest.NewRecorder()
+	app.ServeHTTP(recorder, request)
+	response := recorder.Result()
+	payload, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response, payload
+}
+
 func TestCDNStatusIsAdminOnlyAndReportsInvalidConfiguration(t *testing.T) {
 	repository, err := store.Open(":memory:", testSecret)
 	if err != nil {
@@ -272,8 +292,19 @@ func TestAdminPublishAndScopedClientRead(t *testing.T) {
 	if response.StatusCode != http.StatusOK || bytes.Contains(payload, []byte("integration-secret")) {
 		t.Fatalf("authorized environment rendering status=%d body=%s", response.StatusCode, payload)
 	}
+	renderETag := response.Header.Get("ETag")
+	if renderETag == "" {
+		t.Fatal("render response is missing ETag")
+	}
+	renderPayload := payload
+	response, payload = publicCallWithHeaders(t, app, http.MethodGet, "/api/v1/configs/project/prod/api/render/env", created.Token, map[string]string{
+		"If-None-Match": renderETag,
+	})
+	if response.StatusCode != http.StatusNotModified || len(payload) != 0 {
+		t.Fatalf("conditional render status=%d body=%s", response.StatusCode, payload)
+	}
 	var envelope secure.Envelope
-	if err := json.Unmarshal(payload, &envelope); err != nil {
+	if err := json.Unmarshal(renderPayload, &envelope); err != nil {
 		t.Fatal(err)
 	}
 	plain, err := secure.Decrypt(privatePEM, envelope, config.Address{

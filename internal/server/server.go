@@ -772,8 +772,13 @@ func (s *Server) renderPublished(ctx iris.Context) {
 		writeStoreError(ctx, err)
 		return
 	}
-	ctx.Header("ETag", fmt.Sprintf(`"%d"`, document.Version))
+	etag := fmt.Sprintf(`"%d"`, document.Version)
+	ctx.Header("ETag", etag)
 	ctx.Header("Cache-Control", "no-store")
+	if ctx.GetHeader("If-None-Match") == etag {
+		ctx.StatusCode(iris.StatusNotModified)
+		return
+	}
 	var data []byte
 	switch ctx.Params().Get("format") {
 	case "env":
