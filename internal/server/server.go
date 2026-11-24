@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -50,6 +51,7 @@ type Server struct {
 	limiter        *loginLimiter
 	trustedProxies []*net.IPNet
 	now            func() time.Time
+	cdn            *cdnController
 }
 
 func New(repository *store.Store, adminPassword, authSecret string) *iris.Application {
@@ -65,6 +67,10 @@ func NewWithLogger(repository *store.Store, adminPassword, authSecret string, lo
 }
 
 func NewWithOptions(repository *store.Store, adminPassword, authSecret string, logger *slog.Logger, trustedProxies []string) (*iris.Application, error) {
+	return NewWithCloudflare(repository, adminPassword, authSecret, logger, trustedProxies, CloudflareConfig{})
+}
+
+func NewWithCloudflare(repository *store.Store, adminPassword, authSecret string, logger *slog.Logger, trustedProxies []string, cloudflare CloudflareConfig) (*iris.Application, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -81,6 +87,7 @@ func NewWithOptions(repository *store.Store, adminPassword, authSecret string, l
 		trustedProxies: proxies,
 		now:            time.Now,
 	}
+	s.cdn = newCDNController(cloudflare, repository, logger)
 	app := iris.New()
 	app.Use(s.httpLogger)
 	app.Use(func(ctx iris.Context) {
@@ -137,6 +144,7 @@ func NewWithOptions(repository *store.Store, adminPassword, authSecret string, l
 	admin := app.Party("/api/v1/admin", s.requireAdmin)
 	admin.Use(s.csrfProtect)
 	admin.Get("/configs", s.listConfigs)
+	admin.Get("/cdn/status", s.cdnStatus)
 	admin.Get("/configs/{project}/{environment}/{service}", s.getDraft)
 	admin.Put("/configs/{project}/{environment}/{service}", s.saveDraft)
 	admin.Post("/configs/{project}/{environment}/{service}/import", s.importDraft)
@@ -166,6 +174,16 @@ func NewWithOptions(repository *store.Store, adminPassword, authSecret string, l
 
 	app.Get("/api/v1/configs/{project}/{environment}/{service}", s.getPublished)
 	app.Get("/api/v1/configs/{project}/{environment}/{service}/render/{format}", s.renderPublished)
+	if cloudflare.Enabled && s.cdn.client != nil {
+		cdnCtx, cancel := context.WithCancel(context.Background())
+		s.cdn.start(cdnCtx)
+		app.ConfigureHost(func(su *iris.Supervisor) {
+			su.RegisterOnShutdown(func() {
+				cancel()
+				s.cdn.stop()
+			})
+		})
+	}
 	return app, nil
 }
 
@@ -610,13 +628,27 @@ func (s *Server) publish(ctx iris.Context) {
 		writeError(ctx, iris.StatusBadRequest, "at least one schema field is required")
 		return
 	}
-	version, err := s.store.Publish(address, "admin")
+	var version int
+	if s.cdn.client != nil {
+		version, err = s.store.PublishWithCDNPurge(address, "admin", s.cdn.purgeFiles(address))
+	} else {
+		version, err = s.store.Publish(address, "admin")
+	}
 	if err != nil {
 		writeError(ctx, iris.StatusInternalServerError, err.Error())
 		return
 	}
 	s.logBusiness("config_published", "configuration published", address, slog.Int("version", version))
 	ctx.JSON(iris.Map{"ok": true, "version": version})
+}
+
+func (s *Server) cdnStatus(ctx iris.Context) {
+	status, err := s.cdn.snapshot()
+	if err != nil {
+		writeError(ctx, iris.StatusInternalServerError, err.Error())
+		return
+	}
+	ctx.JSON(status)
 }
 
 func (s *Server) history(ctx iris.Context) {

@@ -42,6 +42,19 @@ type ReadCredential struct {
 	PublicKey []byte
 }
 
+type CDNPurgeJob struct {
+	ID       int64
+	Files    []string
+	Attempts int
+}
+
+type CDNPurgeSummary struct {
+	Pending       int    `json:"pending"`
+	LastStatus    string `json:"lastStatus,omitempty"`
+	LastError     string `json:"lastError,omitempty"`
+	LastUpdatedAt string `json:"lastUpdatedAt,omitempty"`
+}
+
 const environmentConfigKey = "__environment__"
 
 type Project struct {
@@ -139,6 +152,18 @@ CREATE TABLE IF NOT EXISTS config_history (
   created_at TEXT NOT NULL,
   PRIMARY KEY (project, environment, service, module, version)
 );
+CREATE TABLE IF NOT EXISTS cdn_purge_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  files_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT NOT NULL,
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cdn_purge_jobs_pending
+  ON cdn_purge_jobs(status, next_attempt_at, id);
 CREATE TABLE IF NOT EXISTS access_keys (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -614,6 +639,10 @@ WHERE project=? AND environment=? AND service=? AND module=?`,
 }
 
 func (s *Store) Publish(address config.Address, actor string) (int, error) {
+	return s.PublishWithCDNPurge(address, actor, nil)
+}
+
+func (s *Store) PublishWithCDNPurge(address config.Address, actor string, files []string) (int, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, err
@@ -648,10 +677,98 @@ WHERE project=? AND environment=? AND service=? AND module=?`,
 	if err := audit(tx, actor, "publish", address, fmt.Sprintf("version=%d", nextVersion)); err != nil {
 		return 0, err
 	}
+	if len(files) > 0 {
+		filesJSON, err := json.Marshal(files)
+		if err != nil {
+			return 0, err
+		}
+		if _, err := tx.Exec(`INSERT INTO cdn_purge_jobs (files_json, next_attempt_at, created_at, updated_at)
+VALUES(?, ?, ?, ?)`, string(filesJSON), created, created, created); err != nil {
+			return 0, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 	return nextVersion, nil
+}
+
+func (s *Store) ClaimCDNPurgeJob() (*CDNPurgeJob, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var job CDNPurgeJob
+	var filesJSON string
+	err = tx.QueryRow(`SELECT id, files_json, attempts FROM cdn_purge_jobs
+WHERE status='pending' AND next_attempt_at<=? ORDER BY id LIMIT 1`, now()).
+		Scan(&job.ID, &filesJSON, &job.Attempts)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal([]byte(filesJSON), &job.Files); err != nil {
+		return nil, err
+	}
+	result, err := tx.Exec(`UPDATE cdn_purge_jobs SET status='processing', attempts=attempts+1, updated_at=?
+WHERE id=? AND status='pending'`, now(), job.ID)
+	if err != nil {
+		return nil, err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if changed == 0 {
+		return nil, nil
+	}
+	job.Attempts++
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &job, nil
+}
+
+func (s *Store) CompleteCDNPurgeJob(id int64) error {
+	_, err := s.db.Exec(`UPDATE cdn_purge_jobs SET status='completed', last_error='', updated_at=?
+WHERE id=? AND status='processing'`, now(), id)
+	return err
+}
+
+func (s *Store) RetryCDNPurgeJob(id int64, cause string, nextAttempt time.Time) error {
+	_, err := s.db.Exec(`UPDATE cdn_purge_jobs SET status='pending', last_error=?, next_attempt_at=?, updated_at=?
+WHERE id=? AND status='processing'`, cause, nextAttempt.UTC().Format(time.RFC3339Nano), now(), id)
+	return err
+}
+
+func (s *Store) ResetProcessingCDNPurgeJobs() error {
+	_, err := s.db.Exec(`UPDATE cdn_purge_jobs SET status='pending', next_attempt_at=?, updated_at=?
+WHERE status='processing'`, now(), now())
+	return err
+}
+
+func (s *Store) CDNPurgeStatus() (CDNPurgeSummary, error) {
+	var summary CDNPurgeSummary
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM cdn_purge_jobs WHERE status IN ('pending', 'processing')`).
+		Scan(&summary.Pending)
+	if err != nil {
+		return summary, err
+	}
+	err = s.db.QueryRow(`SELECT status, last_error, updated_at FROM cdn_purge_jobs
+ORDER BY CASE
+  WHEN status='pending' AND last_error!='' THEN 0
+  WHEN status IN ('pending', 'processing') THEN 1
+  ELSE 2
+END, id DESC LIMIT 1`).
+		Scan(&summary.LastStatus, &summary.LastError, &summary.LastUpdatedAt)
+	if err == sql.ErrNoRows {
+		return summary, nil
+	}
+	return summary, err
 }
 
 func (s *Store) List() ([]Summary, error) {

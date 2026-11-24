@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/shybily/keynest/internal/config"
 )
@@ -79,6 +80,52 @@ func TestGetPublishedRequiresPublishedVersion(t *testing.T) {
 	_, err = repository.GetPublished(address)
 	if err == nil || err != sql.ErrNoRows {
 		t.Fatalf("GetPublished() error = %v, want sql.ErrNoRows", err)
+	}
+}
+
+func TestPublishWithCDNPurgePersistsRetryableJob(t *testing.T) {
+	repository, err := Open(":memory:", "01234567890123456789012345678901")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repository.Close()
+
+	address := config.Address{Project: "sample", Environment: "prod", Service: "api"}
+	draft := config.Draft{
+		Schema: []config.Field{{Path: "server.port", Label: "Port", Type: "integer"}},
+		Values: map[string]any{"server": map[string]any{"port": float64(8080)}},
+	}
+	if err := repository.SaveDraft(address, draft); err != nil {
+		t.Fatal(err)
+	}
+	files := []string{
+		"https://keynest.example/api/v1/configs/sample/prod/api",
+		"https://keynest.example/api/v1/configs/sample/prod/api/render/env",
+		"https://keynest.example/api/v1/configs/sample/prod/api/render/yaml",
+	}
+	if version, err := repository.PublishWithCDNPurge(address, "test", files); err != nil || version != 1 {
+		t.Fatalf("PublishWithCDNPurge() = (%d, %v), want (1, nil)", version, err)
+	}
+
+	job, err := repository.ClaimCDNPurgeJob()
+	if err != nil || job == nil {
+		t.Fatalf("ClaimCDNPurgeJob() = (%#v, %v), want a job", job, err)
+	}
+	if job.Attempts != 1 || len(job.Files) != len(files) {
+		t.Fatalf("claimed job = %#v, want one attempt and %d files", job, len(files))
+	}
+	if err := repository.RetryCDNPurgeJob(job.ID, "temporary failure", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := repository.CDNPurgeStatus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Pending != 1 || summary.LastStatus != "pending" || summary.LastError != "temporary failure" {
+		t.Fatalf("unexpected CDN purge summary: %#v", summary)
+	}
+	if err := repository.ResetProcessingCDNPurgeJobs(); err != nil {
+		t.Fatal(err)
 	}
 }
 

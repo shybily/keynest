@@ -60,6 +60,11 @@ volumes:
 KEYNEST_ADMIN_PASSWORD=replace-with-a-strong-password
 KEYNEST_AUTH_SECRET=replace-with-at-least-32-random-bytes
 KEYNEST_ENCRYPTION_KEY=replace-with-a-different-32-byte-random-key
+# Optional Cloudflare cache purge configuration:
+# KEYNEST_CLOUDFLARE_ENABLED=true
+# KEYNEST_CLOUDFLARE_API_TOKEN=replace-with-a-zone-scoped-token
+# KEYNEST_CLOUDFLARE_ZONE_ID=your-cloudflare-zone-id
+# KEYNEST_PUBLIC_URL=https://config.example.com
 ```
 
 构建并启动：
@@ -86,6 +91,21 @@ docker compose logs --tail=100 keynest
 登录后选择项目、环境和服务，再编辑该服务环境的 Schema 字段。字段路径支持点分层级，例如 `database.maxOpenConns`。类型包括字符串、整数、数字、布尔、枚举、密钥和 JSON；字段可映射到 `.env` 变量名和 YAML 路径。也可导入 `.env`、YAML 或 JSON 文件，导入结果先保存为草稿，不会自动发布。
 
 草稿保存不会影响服务读取结果。发布前会校验字段路径、类型、必填值及重复映射；发布成功后产生递增版本。发布历史可恢复为草稿，再次发布后成为新版本。
+
+### Cloudflare CDN 刷新
+
+Cloudflare 缓存刷新默认关闭。需要时在部署环境中设置以下变量并重启 Keynest：
+
+- `KEYNEST_CLOUDFLARE_ENABLED=true`：启用发布后的 CDN 刷新；未设置或为 `false` 时关闭。
+- `KEYNEST_CLOUDFLARE_API_TOKEN`：Cloudflare API Token。
+- `KEYNEST_CLOUDFLARE_ZONE_ID`：目标 Zone ID。
+- `KEYNEST_PUBLIC_URL`：Keynest 的规范 HTTPS 公开地址，不带查询参数或片段。
+
+Token 至少需要目标 Zone 的 `Zone:Read` 和 `Cache Purge` 权限，用于校验 Zone 访问权及清理缓存。Token 只从环境变量读取，不保存到数据库或后台页面。
+
+开关开启后，Keynest 会校验配置、Token 状态及 Zone 访问权。必要配置缺失或校验无效时，Keynest 仍正常启动和发布配置，但自动暂停 CDN 刷新；暂时无法连接 Cloudflare 时会显示为不可用并定期重试校验。Token 还必须具有 `Cache Purge` 权限；若 Cloudflare 在首次实际刷新时拒绝该权限，刷新会自动暂停，修正 Token 权限后重启 Keynest。管理后台侧栏展示 CDN 状态、待刷新任务数及最近错误。
+
+发布配置与针对该服务的三条 CDN 刷新 URL（加密配置、`.env` 渲染、YAML 渲染）会在同一 SQLite 事务中记录。刷新在后台执行，失败会保留任务并退避重试，不会回滚发布版本。此功能只清理缓存，不会自动启用 Cloudflare 缓存规则；多 Keynest 公开域名部署时，当前只刷新 `KEYNEST_PUBLIC_URL` 指定的规范地址。
 
 ### 服务读取凭证与传输加密
 

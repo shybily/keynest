@@ -29,6 +29,7 @@
     dialogScope: null,
     diffVersion: null,
     loggedIn: false,
+    cdnStatusTimer: null,
     busy: false,
     lastActivity: Date.now(),
     sessionWarned: false,
@@ -165,6 +166,8 @@
 
   function showLogin(message) {
     state.loggedIn = false;
+    clearInterval(state.cdnStatusTimer);
+    state.cdnStatusTimer = null;
     state.pendingHash = null;
     state.bypassHash = false;
     clearInterval(state.loginLockTimer);
@@ -357,10 +360,48 @@
     state.summaries = map;
   }
 
+  function renderCDNStatus(status) {
+    const node = $("#cdn-status");
+    const labels = {
+      disabled: status.configured ? "CDN 自动关闭" : "CDN 未启用",
+      verifying: "CDN 校验中",
+      unavailable: "CDN 暂不可用",
+      enabled: "CDN 已启用"
+    };
+    node.className = "cdn-status " + esc(status.state || "unavailable");
+    node.textContent = labels[status.state] || "CDN 状态未知";
+    const details = [];
+    if (status.message) details.push(status.message);
+    if (status.pending) details.push("待刷新任务：" + status.pending);
+    if (status.lastError) details.push("最近错误：" + status.lastError);
+    node.title = details.join("；");
+    node.setAttribute("aria-label", [node.textContent, ...details].filter(Boolean).join("；"));
+  }
+
+  async function loadCDNStatus() {
+    try {
+      renderCDNStatus(await api("/api/v1/admin/cdn/status"));
+    } catch (failure) {
+      renderCDNStatus({ state: "unavailable", message: failure.message || "CDN 状态查询失败" });
+      throw failure;
+    }
+  }
+
   async function bootstrap() {
     try {
       await Promise.all([loadResources(), loadKeys(), loadSummaries()]);
+      try {
+        await loadCDNStatus();
+      } catch (failure) {
+        if (failure.status !== 401) toastError(failure);
+      }
       await handleRoute(location.hash || state.hash || "#/");
+      clearInterval(state.cdnStatusTimer);
+      state.cdnStatusTimer = setInterval(() => {
+        if (state.loggedIn && document.visibilityState !== "hidden") {
+          loadCDNStatus().catch(() => {});
+        }
+      }, 15000);
     } catch (failure) {
       if (failure.status !== 401) toastError(failure);
     }
@@ -1276,6 +1317,7 @@
       const payload = await api(draftUrl(state.route, "/publish"), { method: "POST" });
       closeDialog(dialogById("dlg-publish"));
       toast("已发布 v" + payload.version);
+      loadCDNStatus().catch(() => {});
       await reloadEditor();
       refreshSummariesQuietly();
       if (state.tab === "history") loadHistory();

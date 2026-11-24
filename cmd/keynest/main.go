@@ -3,6 +3,7 @@ package main
 import (
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/shybily/keynest/internal/server"
@@ -36,8 +37,22 @@ func main() {
 
 	address := envOr("KEYNEST_ADDR", ":8080")
 	trustedProxies := strings.Split(os.Getenv("KEYNEST_TRUSTED_PROXIES"), ",")
+	cloudflare := server.CloudflareConfig{
+		APIToken:  os.Getenv("KEYNEST_CLOUDFLARE_API_TOKEN"),
+		ZoneID:    os.Getenv("KEYNEST_CLOUDFLARE_ZONE_ID"),
+		PublicURL: os.Getenv("KEYNEST_PUBLIC_URL"),
+	}
+	if enabled := strings.TrimSpace(os.Getenv("KEYNEST_CLOUDFLARE_ENABLED")); enabled != "" {
+		parsed, parseErr := strconv.ParseBool(enabled)
+		if parseErr != nil {
+			cloudflare.Enabled = true
+			cloudflare.ValidationError = "KEYNEST_CLOUDFLARE_ENABLED 必须为 true 或 false"
+		} else {
+			cloudflare.Enabled = parsed
+		}
+	}
 	slog.Info("Keynest starting", "event", "startup", "version", version, "address", address, "database", dbPath)
-	app, err := server.NewWithOptions(repository, adminPassword, authSecret, slog.Default(), trustedProxies)
+	app, err := server.NewWithCloudflare(repository, adminPassword, authSecret, slog.Default(), trustedProxies, cloudflare)
 	if err != nil {
 		slog.Error("failed to initialize server", "event", "startup_failed", "error", err)
 		os.Exit(1)

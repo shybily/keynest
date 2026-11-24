@@ -115,6 +115,43 @@ func publicCall(t *testing.T, app *iris.Application, method, path, token string)
 	return response, payload
 }
 
+func TestCDNStatusIsAdminOnlyAndReportsInvalidConfiguration(t *testing.T) {
+	repository, err := store.Open(":memory:", testSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repository.Close()
+	app, err := NewWithCloudflare(repository, "test-password", testSecret, nil, nil, CloudflareConfig{
+		Enabled:   true,
+		ZoneID:    "zone",
+		PublicURL: "https://keynest.example",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Build(); err != nil {
+		t.Fatal(err)
+	}
+	response, _ := publicCall(t, app, http.MethodGet, "/api/v1/admin/cdn/status", "")
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated CDN status request = %d, want 401", response.StatusCode)
+	}
+
+	client := loginClient(t, app)
+	response, payload := client.call(http.MethodGet, "/api/v1/admin/cdn/status", nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("CDN status request = %d: %s", response.StatusCode, payload)
+	}
+	var status CDNStatus
+	if err := json.Unmarshal(payload, &status); err != nil {
+		t.Fatal(err)
+	}
+	if !status.Configured || status.Enabled || status.State != "disabled" ||
+		!strings.Contains(status.Message, "API_TOKEN") {
+		t.Fatalf("unexpected CDN status: %#v", status)
+	}
+}
+
 func TestAdminPublishAndScopedClientRead(t *testing.T) {
 	app, _ := newTestApp(t)
 
