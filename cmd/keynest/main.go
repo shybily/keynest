@@ -10,7 +10,7 @@ import (
 	"github.com/shybily/keynest/internal/store"
 )
 
-var version = "0.3.2"
+var version = "0.3.3"
 
 func main() {
 	dbPath := envOr("KEYNEST_DB", "data/keynest.db")

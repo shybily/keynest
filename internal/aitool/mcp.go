@@ -80,7 +80,7 @@ func ServeMCP(ctx context.Context, client *Client, in io.Reader, out io.Writer) 
 			result = map[string]any{
 				"protocolVersion": mcpProtocolVersion,
 				"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
-				"serverInfo":      map[string]any{"name": "keynest", "version": "0.3.2"},
+				"serverInfo":      map[string]any{"name": "keynest", "version": "0.3.3"},
 			}
 		case "ping":
 			result = map[string]any{}

@@ -263,3 +263,125 @@ func TestFetchUsesPersistentCacheWhenCenterUnavailable(t *testing.T) {
 		t.Fatalf("unauthorized response used fallback; callback count = %d", fallbackCalls)
 	}
 }
+
+func TestWatchSurvivesTransientFailures(t *testing.T) {
+	privatePEM, publicPEM, err := secure.GenerateKeyPair(2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := Address{Project: "project", Environment: "prod", Service: "api"}
+	plain, err := json.Marshal(Document{Address: address, Version: 11, Values: map[string]any{"port": float64(8080)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := secure.Encrypt(publicPEM, "key-1", config.Address{
+		Project: address.Project, Environment: address.Environment, Service: address.Service,
+	}, 11, plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) <= 2 {
+			http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(envelope)
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL, "test-token", privatePEM, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	changed := make(chan int, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- client.Watch(ctx, address, 5*time.Millisecond, func(document Document) error {
+			changed <- document.Version
+			return nil
+		})
+	}()
+	select {
+	case version := <-changed:
+		if version != 11 {
+			t.Fatalf("watch version = %d, want 11", version)
+		}
+	case err := <-done:
+		t.Fatalf("Watch() exited before recovery: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Watch() did not recover after transient failures")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Watch() error = %v, want context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Watch() did not stop after cancellation")
+	}
+}
+
+func TestWatchRetriesFailedCallback(t *testing.T) {
+	privatePEM, publicPEM, err := secure.GenerateKeyPair(2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := Address{Project: "project", Environment: "prod", Service: "api"}
+	plain, err := json.Marshal(Document{Address: address, Version: 4, Values: map[string]any{"port": float64(8080)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := secure.Encrypt(publicPEM, "key-1", config.Address{
+		Project: address.Project, Environment: address.Environment, Service: address.Service,
+	}, 4, plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(envelope)
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL, "test-token", privatePEM, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var calls atomic.Int32
+	succeeded := make(chan struct{}, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- client.Watch(ctx, address, 5*time.Millisecond, func(Document) error {
+			if calls.Add(1) == 1 {
+				return errors.New("temporary callback failure")
+			}
+			select {
+			case succeeded <- struct{}{}:
+			default:
+			}
+			return nil
+		})
+	}()
+	select {
+	case <-succeeded:
+	case err := <-done:
+		t.Fatalf("Watch() exited after callback failure: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Watch() did not retry a failed callback")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Watch() error = %v, want context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Watch() did not stop after cancellation")
+	}
+}

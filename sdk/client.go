@@ -389,23 +389,31 @@ func (c *Client) Watch(ctx context.Context, address Address, interval time.Durat
 		return fmt.Errorf("watch callback is required")
 	}
 	var lastVersion int
-	fetch := func() error {
+	fetch := func() {
 		document, err := c.Fetch(ctx, address)
 		if err != nil {
-			return err
+			if ctx.Err() != nil {
+				return
+			}
+			c.logger.Log(LogLevelWarn, "sdk_watch_fetch_failed", "watch fetch failed; retrying on next tick", LogFields{
+				"project": address.Project, "environment": address.Environment,
+				"service": address.Service, "error": err,
+			})
+			return
 		}
 		if document.Version == lastVersion {
-			return nil
+			return
 		}
 		if err := onChange(document); err != nil {
-			return err
+			c.logger.Log(LogLevelWarn, "sdk_watch_callback_failed", "watch callback failed; retrying on next tick", LogFields{
+				"project": address.Project, "environment": address.Environment,
+				"service": address.Service, "version": document.Version, "error": err,
+			})
+			return
 		}
 		lastVersion = document.Version
-		return nil
 	}
-	if err := fetch(); err != nil {
-		return err
-	}
+	fetch()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -413,9 +421,7 @@ func (c *Client) Watch(ctx context.Context, address Address, interval time.Durat
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			if err := fetch(); err != nil {
-				return err
-			}
+			fetch()
 		}
 	}
 }
